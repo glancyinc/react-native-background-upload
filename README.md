@@ -8,7 +8,7 @@ In addition, provides methods to request more background time to the OS in order
 
 ## 1. Install package
 
-Add to packages.json: "react-native-background-upload": "github:cristianoccazinsp/react-native-background-upload"
+Add to packages.json: "react-native-background-upload": "github:glancyinc/react-native-background-upload"
 
 
 ## 2. Link Native Code
