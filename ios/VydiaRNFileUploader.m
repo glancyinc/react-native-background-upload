@@ -108,7 +108,10 @@ static VydiaRNFileUploader *sharedInstance;
 RCT_EXPORT_METHOD(getFileInfo:(NSString *)path resolve:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject)
 {
     @try {
-        NSURL *fileUri = [NSURL URLWithString: path];
+        //fix: non latin multipart file upload (moved from main repo)
+        NSString *escapedPath = [path stringByAddingPercentEncodingWithAllowedCharacters: NSCharacterSet.URLQueryAllowedCharacterSet];
+        NSURL *fileUri = [NSURL URLWithString:escapedPath];
+
         NSString *pathWithoutProtocol = [fileUri path];
         NSString *name = [fileUri lastPathComponent];
         NSString *extension = [name pathExtension];
@@ -141,9 +144,12 @@ RCT_EXPORT_METHOD(getFileInfo:(NSString *)path resolve:(RCTPromiseResolveBlock)r
 - (NSString *)guessMIMETypeFromFileName: (NSString *)fileName {
     CFStringRef UTI = UTTypeCreatePreferredIdentifierForTag(kUTTagClassFilenameExtension, (__bridge CFStringRef)[fileName pathExtension], NULL);
     CFStringRef MIMEType = UTTypeCopyPreferredTagWithClass(UTI, kUTTagClassMIMEType);
-    CFRelease(UTI);
+
+    if (UTI) {
+        CFRelease(UTI);
+    }
    
-    if (!MIMEType) {
+    if (!MIMEType) { //Fixes crash if UTI is null on Mac M1 Simulators (ported from main repo)
         return @"application/octet-stream";
     }
     
@@ -202,6 +208,7 @@ RCT_EXPORT_METHOD(startUpload:(NSDictionary *)options resolve:(RCTPromiseResolve
     NSString *uploadType = options[@"type"] ?: @"raw";
     NSString *fieldName = options[@"field"];
     NSString *customUploadId = options[@"customUploadId"];
+    NSString *appGroup = options[@"appGroup"]; 
     NSDictionary *headers = options[@"headers"];
     NSDictionary *parameters = options[@"parameters"];
 
@@ -219,8 +226,9 @@ RCT_EXPORT_METHOD(startUpload:(NSDictionary *)options resolve:(RCTPromiseResolve
 
     @try {
         NSURL *requestUrl = [NSURL URLWithString: uploadUrl];
-        if (requestUrl == nil) {
-            @throw @"Request URL cannot be nil";
+        if (requestUrl == nil) {            
+            return reject(@"RN Uploader", @"URL not compliant with RFC 2396", nil); //fixes  untracable crashes when URL is not parsable (moved from main repo)
+
         }
 
         NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:requestUrl];
@@ -259,9 +267,12 @@ RCT_EXPORT_METHOD(startUpload:(NSDictionary *)options resolve:(RCTPromiseResolve
             [request setValue:[NSString stringWithFormat:@"multipart/form-data; boundary=%@", uuidStr] forHTTPHeaderField:@"Content-Type"];
 
             NSData *httpBody = [self createBodyWithBoundary:uuidStr path:fileURI parameters: parameters fieldName:fieldName];
+            
+            //Video uploads largers than ~100MB fail on iOS (moved from main repo)
+            [request setHTTPBodyStream: [NSInputStream inputStreamWithData:httpBody]];
+            [request setValue:[NSString stringWithFormat:@"%zd", httpBody.length] forHTTPHeaderField:@"Content-Length"];
 
-            [request setHTTPBody: httpBody];
-            uploadTask = [[self urlSession] uploadTaskWithStreamedRequest:request];
+            uploadTask = [[self urlSession: appGroup] uploadTaskWithStreamedRequest:request];
 
 
         } else {
@@ -270,7 +281,7 @@ RCT_EXPORT_METHOD(startUpload:(NSDictionary *)options resolve:(RCTPromiseResolve
                 return;
             }
 
-            uploadTask = [[self urlSession] uploadTaskWithRequest:request fromFile:[NSURL URLWithString: fileURI]];
+            uploadTask = [[self urlSession: appGroup] uploadTaskWithRequest:request fromFile:[NSURL URLWithString: fileURI]];
         }
 
         uploadTask.taskDescription = thisUploadId;
@@ -407,8 +418,18 @@ RCT_EXPORT_METHOD(endBackgroundTask: (NSUInteger)taskId resolve:(RCTPromiseResol
 
     // resolve path
     if ([path length] > 0){
-        NSURL *fileUri = [NSURL URLWithString: path];
+        // fix: non latin multipart file upload (moved from main repo)
+        NSString *escapedPath = [path stringByAddingPercentEncodingWithAllowedCharacters: NSCharacterSet.URLQueryAllowedCharacterSet];
+
+        NSURL *fileUri = [NSURL URLWithString: escapedPath];
         NSString *pathWithoutProtocol = [fileUri path];
+
+        NSError* error = nil;
+        NSData *data = [NSData dataWithContentsOfURL:fileUri options:NSDataReadingMappedAlways error: &error];
+
+        if (data == nil) {
+            NSLog(@"Failed to read file %@", error);
+        }
 
         NSData *data = [[NSFileManager defaultManager] contentsAtPath:pathWithoutProtocol];
         NSString *filename  = [path lastPathComponent];
@@ -427,11 +448,14 @@ RCT_EXPORT_METHOD(endBackgroundTask: (NSUInteger)taskId resolve:(RCTPromiseResol
     return httpBody;
 }
 
-- (NSURLSession *)urlSession {
+- (NSURLSession *)urlSession: (NSString *) groupId {
     @synchronized (self) {
         if (_urlSession == nil) {
             NSURLSessionConfiguration *sessionConfiguration = [NSURLSessionConfiguration backgroundSessionConfigurationWithIdentifier:BACKGROUND_SESSION_ID];
 
+            if (groupId != nil && ![groupId isEqualToString:@""]) {
+                sessionConfiguration.sharedContainerIdentifier = groupId;
+            }
             // UPDATE: Enforce a timeout here because we will otherwise
             // not get errors if the server times out
             sessionConfiguration.timeoutIntervalForResource = 5 * 60;
@@ -444,6 +468,18 @@ RCT_EXPORT_METHOD(endBackgroundTask: (NSUInteger)taskId resolve:(RCTPromiseResol
 }
 
 #pragma NSURLSessionTaskDelegate
+
+//Video uploads largers than ~100MB fail on iOS (moved from main repo)
+- (void)URLSession:(NSURLSession *)session
+              task:(NSURLSessionTask *)task
+ needNewBodyStream:(void (^)(NSInputStream *bodyStream))completionHandler {
+
+    NSInputStream *inputStream = task.originalRequest.HTTPBodyStream;
+
+    if (completionHandler) {
+        completionHandler(inputStream);
+    }
+}
 
 - (void)URLSession:(NSURLSession *)session
               task:(NSURLSessionTask *)task

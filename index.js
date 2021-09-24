@@ -23,7 +23,8 @@ export type StartUploadArgs = {
   // parameters are supported only in multipart type
   parameters?: { [string]: string },
   headers?: Object,
-  notification?: NotificationArgs
+  notification?: NotificationArgs,
+  appGroup?: string;
 }
 
 const NativeModule = NativeModules.VydiaRNFileUploader;
